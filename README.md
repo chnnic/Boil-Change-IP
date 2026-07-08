@@ -46,6 +46,38 @@ yum install -y curl python3 ca-certificates
 boil
 ```
 
+### 升级旧版
+
+如果你的菜单里还没有：
+
+```text
+9) 更新脚本（从 GitHub 拉取）
+```
+
+说明本机还是旧版脚本。旧版没有菜单更新入口，需要先手动更新一次：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/chnnic/Boil-Change-IP/main/install-online.sh | bash
+```
+
+更新完成后重新运行：
+
+```bash
+boil
+```
+
+以后可以直接在菜单里选择 `9) 更新脚本（从 GitHub 拉取）`，或者运行：
+
+```bash
+boil update
+```
+
+查看当前版本：
+
+```bash
+boil version
+```
+
 ### 方式二：使用 git 下载并安装
 
 ```bash
@@ -126,7 +158,7 @@ IP 质量查询不会使用 ping0.cc 数据。
 
 ## 更新脚本
 
-进入菜单后选择：
+`V1.0.3` 起，菜单内置更新入口。进入菜单后选择：
 
 ```text
 9) 更新脚本（从 GitHub 拉取）
@@ -134,11 +166,13 @@ IP 质量查询不会使用 ping0.cc 数据。
 
 脚本会从 GitHub 下载最新版，先做语法校验，再覆盖本地 `boil` 命令。
 
-也可以直接运行：
+也可以不进菜单，直接运行：
 
 ```bash
 boil update
 ```
+
+如果执行 `boil update` 提示命令不存在，或者菜单里没有第 `9` 项，说明本机还是旧版，请使用上面的“升级旧版”命令先手动更新一次。
 
 查看当前版本：
 
