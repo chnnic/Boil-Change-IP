@@ -308,6 +308,211 @@ show_current_ip() {
   fi
 }
 
+trim_text() {
+  python3 -c 'import sys; print(sys.stdin.read().strip())'
+}
+
+detect_public_ip() {
+  local url ip
+
+  for url in \
+    "https://api.ipify.org" \
+    "https://checkip.amazonaws.com" \
+    "https://icanhazip.com"; do
+    ip="$(curl -fsS --noproxy '*' --connect-timeout 5 --max-time 10 "$url" 2>/dev/null | trim_text || true)"
+    if [ -n "$ip" ] && [[ "$ip" != *" "* ]]; then
+      printf '%s\n' "$ip"
+      return 0
+    fi
+  done
+
+  printf '无法查询本机公网出口 IP。\n' >&2
+  return 1
+}
+
+bool_text() {
+  case "$1" in
+    true) printf '是\n' ;;
+    false) printf '否\n' ;;
+    "") printf '未知\n' ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+ip_quality_dnsbl_report() {
+  local ip="$1"
+
+  python3 - "$ip" <<'PY'
+import ipaddress
+import socket
+import sys
+
+target = sys.argv[1]
+lists = [
+    ("Spamhaus ZEN", "zen.spamhaus.org"),
+    ("Spamcop", "bl.spamcop.net"),
+    ("SORBS", "dnsbl.sorbs.net"),
+    ("Barracuda", "b.barracudacentral.org"),
+]
+
+try:
+    ip = ipaddress.ip_address(target)
+except ValueError:
+    print("DNSBL 检测: IP 格式无效，已跳过")
+    print("__DNSBL_HITS__=0")
+    raise SystemExit(0)
+
+if ip.version != 4:
+    print("DNSBL 检测: 仅支持 IPv4，IPv6 已跳过")
+    print("__DNSBL_HITS__=0")
+    raise SystemExit(0)
+
+reverse = ".".join(reversed(str(ip).split(".")))
+socket.setdefaulttimeout(2)
+hits = 0
+
+print("DNSBL 检测:")
+for label, zone in lists:
+    query = f"{reverse}.{zone}"
+    try:
+        _, _, addresses = socket.gethostbyname_ex(query)
+    except socket.gaierror:
+        print(f"  {label}: 未命中")
+        continue
+    except socket.timeout:
+        print(f"  {label}: 查询超时")
+        continue
+    except OSError as exc:
+        print(f"  {label}: 查询失败 ({exc})")
+        continue
+
+    if any(addr.startswith("127.255.255.") for addr in addresses):
+        print(f"  {label}: 查询受限")
+        continue
+
+    hits += 1
+    print(f"  {label}: 命中 ({', '.join(addresses)})")
+
+print(f"DNSBL 命中数: {hits}/{len(lists)}")
+print(f"__DNSBL_HITS__={hits}")
+PY
+}
+
+print_ip_quality_result() {
+  local ip="$1"
+  local body status error country region city isp org asn asname mobile proxy hosting
+  local dnsbl_report dnsbl_hits score level
+
+  printf 'IP 质量查询: %s\n' "$ip"
+  printf '数据源: ip-api.com + DNSBL，本工具未使用 ping0.cc 数据。\n\n'
+
+  body="$(curl -sS --noproxy '*' --connect-timeout 8 --max-time 15 "http://ip-api.com/json/$ip?fields=status,message,query,country,regionName,city,isp,org,as,asname,mobile,proxy,hosting" 2>/dev/null || true)"
+  status="$(printf '%s' "$body" | json_value status 2>/dev/null || true)"
+
+  if [ "$status" != "success" ]; then
+    error="$(printf '%s' "$body" | json_value message 2>/dev/null || true)"
+    if [ -n "$error" ]; then
+      printf '基础信息查询失败: %s\n\n' "$error"
+    else
+      printf '基础信息查询失败。\n\n'
+    fi
+  else
+    country="$(printf '%s' "$body" | json_value country 2>/dev/null || true)"
+    region="$(printf '%s' "$body" | json_value regionName 2>/dev/null || true)"
+    city="$(printf '%s' "$body" | json_value city 2>/dev/null || true)"
+    isp="$(printf '%s' "$body" | json_value isp 2>/dev/null || true)"
+    org="$(printf '%s' "$body" | json_value org 2>/dev/null || true)"
+    asn="$(printf '%s' "$body" | json_value as 2>/dev/null || true)"
+    asname="$(printf '%s' "$body" | json_value asname 2>/dev/null || true)"
+    mobile="$(printf '%s' "$body" | json_value mobile 2>/dev/null || true)"
+    proxy="$(printf '%s' "$body" | json_value proxy 2>/dev/null || true)"
+    hosting="$(printf '%s' "$body" | json_value hosting 2>/dev/null || true)"
+
+    printf '位置: %s %s %s\n' "${country:-未知}" "${region:-}" "${city:-}"
+    printf 'ASN: %s\n' "${asn:-未知}"
+    if [ -n "$asname" ]; then
+      printf 'AS 名称: %s\n' "$asname"
+    fi
+    printf 'ISP: %s\n' "${isp:-未知}"
+    printf '组织: %s\n' "${org:-未知}"
+    printf '移动网络: %s\n' "$(bool_text "$mobile")"
+    printf '代理/VPN/Tor 标记: %s\n' "$(bool_text "$proxy")"
+    printf '机房/Hosting 标记: %s\n\n' "$(bool_text "$hosting")"
+  fi
+
+  dnsbl_report="$(ip_quality_dnsbl_report "$ip")"
+  printf '%s\n\n' "$(printf '%s\n' "$dnsbl_report" | sed '/^__DNSBL_HITS__=/d')"
+  dnsbl_hits="$(printf '%s\n' "$dnsbl_report" | sed -n 's/^__DNSBL_HITS__=//p' | tail -n 1)"
+  dnsbl_hits="${dnsbl_hits:-0}"
+
+  score=0
+  [ "${proxy:-}" = "true" ] && score=$((score + 40))
+  [ "${hosting:-}" = "true" ] && score=$((score + 30))
+  if [[ "$dnsbl_hits" =~ ^[0-9]+$ ]] && [ "$dnsbl_hits" -gt 0 ]; then
+    score=$((score + 40))
+  fi
+
+  if [ "$score" -ge 60 ]; then
+    level="风险较高"
+  elif [ "$score" -ge 30 ]; then
+    level="一般"
+  else
+    level="较干净"
+  fi
+
+  printf '参考结论: %s\n' "$level"
+  printf '说明: 结果仅供参考；不同平台风控规则不同，不能保证账号、支付或注册场景一定可用。\n'
+}
+
+ip_quality_menu() {
+  local choice ip
+
+  while true; do
+    cat <<'EOF'
+IP 质量查询
+1) 查询 Boil 当前 IP 质量（需要 API Token）
+2) 查询本机公网出口 IP 质量
+3) 手动输入 IP 查询质量
+0) 返回主菜单
+EOF
+    printf '\n请选择: '
+    IFS= read -r choice
+    printf '\n'
+
+    case "$choice" in
+      1)
+        if ip="$(get_ip_plain)"; then
+          print_ip_quality_result "$ip"
+        fi
+        return 0
+        ;;
+      2)
+        if ip="$(detect_public_ip)"; then
+          print_ip_quality_result "$ip"
+        fi
+        return 0
+        ;;
+      3)
+        printf '请输入要查询的 IP: '
+        IFS= read -r ip
+        ip="$(printf '%s' "$ip" | trim_text)"
+        if [ -z "$ip" ]; then
+          printf 'IP 不能为空。\n'
+        else
+          print_ip_quality_result "$ip"
+          return 0
+        fi
+        ;;
+      0|q|Q)
+        return 0
+        ;;
+      *)
+        printf '无效选择。\n\n'
+        ;;
+    esac
+  done
+}
+
 change_ip() {
   local wait_for_change="${1:-0}"
   local old_ip new_ip body message uses_left next_allowed_at readable start now
@@ -414,12 +619,13 @@ menu_loop() {
     print_header
     cat <<'EOF'
 1) 查询当前 IP
-2) 更换 IP
-3) 更换 IP 并等待新 IP
-4) 查看 API 剩余次数缓存
-5) 设置/更新 API Token
-6) 查看 Token 保存位置
-7) 删除已保存 Token
+2) IP 质量查询
+3) 更换 IP
+4) 更换 IP 并等待新 IP
+5) 查看 API 剩余次数缓存
+6) 设置/更新 API Token
+7) 查看 Token 保存位置
+8) 删除已保存 Token
 0) 退出
 EOF
     printf '\n请选择: '
@@ -432,27 +638,31 @@ EOF
         pause_screen
         ;;
       2)
-        change_ip 0
+        ip_quality_menu
         pause_screen
         ;;
       3)
-        change_ip 1
+        change_ip 0
         pause_screen
         ;;
       4)
-        show_cached_quota
+        change_ip 1
         pause_screen
         ;;
       5)
-        prompt_token
+        show_cached_quota
         pause_screen
         ;;
       6)
+        prompt_token
+        pause_screen
+        ;;
+      7)
         printf 'Token 文件: %s\n' "$(token_file)"
         printf '状态缓存: %s\n' "$(state_file)"
         pause_screen
         ;;
-      7)
+      8)
         remove_token
         pause_screen
         ;;
@@ -494,7 +704,7 @@ Boil Change IP
   boil
 
 说明:
-  默认进入菜单，可在菜单中查询 IP、更换 IP、保存 Token、查看剩余次数缓存。
+  默认进入菜单，可在菜单中查询 IP、查询 IP 质量、更换 IP、保存 Token、查看剩余次数缓存。
 
 环境变量:
   BOIL_TOKEN       临时指定 API Token，不读取 Token 文件

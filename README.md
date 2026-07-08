@@ -7,6 +7,7 @@ API 文档来源：<https://cloud.boil.network/tutorial.php#api>
 ## 功能
 
 - 查询当前 Boil IP
+- 查询 IP 质量，不使用 ping0.cc 数据
 - 调用 Boil API 更换 IP
 - 更换 IP 后显示 API 剩余次数
 - 显示下次可更换 IP 的时间
@@ -85,23 +86,44 @@ boil
 
 ```text
 1) 查询当前 IP
-2) 更换 IP
-3) 更换 IP 并等待新 IP
-4) 查看 API 剩余次数缓存
-5) 设置/更新 API Token
-6) 查看 Token 保存位置
-7) 删除已保存 Token
+2) IP 质量查询
+3) 更换 IP
+4) 更换 IP 并等待新 IP
+5) 查看 API 剩余次数缓存
+6) 设置/更新 API Token
+7) 查看 Token 保存位置
+8) 删除已保存 Token
 0) 退出
 ```
 
-首次使用请先选择 `5) 设置/更新 API Token`。
+首次使用请先选择 `6) 设置/更新 API Token`。
+
+## IP 质量查询
+
+菜单选择 `2) IP 质量查询` 后，可以选择：
+
+```text
+1) 查询 Boil 当前 IP 质量（需要 API Token）
+2) 查询本机公网出口 IP 质量
+3) 手动输入 IP 查询质量
+0) 返回主菜单
+```
+
+IP 质量查询不会使用 ping0.cc 数据。
+
+当前使用的数据：
+
+- `ip-api.com`：国家、地区、ASN、ISP、组织、是否移动网络、是否代理/VPN/Tor、是否 Hosting/机房
+- DNSBL 本地查询：Spamhaus ZEN、Spamcop、SORBS、Barracuda
+
+说明：IP 质量结果仅供参考。不同平台的风控规则不同，检测结果不能保证账号、支付、注册、直播或电商场景一定可用。
 
 ## 获取 API Token
 
 1. 打开 Boil IP 管理面板：<https://ippanel.boil.network/>
 2. 登录并取得 IP 后，点击“获取 API”。
 3. 复制生成的 API Token。
-4. 运行 `boil`，在菜单中选择 `5) 设置/更新 API Token`，粘贴 Token。
+4. 运行 `boil`，在菜单中选择 `6) 设置/更新 API Token`，粘贴 Token。
 
 ## API 剩余次数说明
 
