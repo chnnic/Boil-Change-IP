@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -u
 
+VERSION="V1.0.1"
 API_BASE="${BOIL_API_BASE:-https://ippanel.boil.network/api/v1}"
+UPDATE_URL="${BOIL_UPDATE_URL:-https://raw.githubusercontent.com/chnnic/Boil-Change-IP/main/boil}"
 SYSTEM_DIR="/etc/boil"
 SYSTEM_TOKEN_FILE="$SYSTEM_DIR/token"
 SYSTEM_STATE_FILE="$SYSTEM_DIR/state.json"
@@ -24,6 +26,29 @@ user_config_dir() {
 
 user_state_dir() {
   printf '%s\n' "${XDG_STATE_HOME:-${HOME:-/tmp}/.local/state}/boil"
+}
+
+current_script_path() {
+  local script="$0"
+
+  if [ -n "${BOIL_UPDATE_TARGET:-}" ]; then
+    printf '%s\n' "$BOIL_UPDATE_TARGET"
+    return 0
+  fi
+
+  if [ "$script" = "bash" ] || [ "$script" = "sh" ]; then
+    script="$(command -v boil 2>/dev/null || true)"
+  elif [ "${script#/}" = "$script" ]; then
+    script="$(command -v "$script" 2>/dev/null || printf '%s/%s' "$PWD" "$script")"
+  fi
+
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$script"
+  elif command -v readlink >/dev/null 2>&1; then
+    readlink -f "$script" 2>/dev/null || printf '%s\n' "$script"
+  else
+    printf '%s\n' "$script"
+  fi
 }
 
 token_file() {
@@ -306,6 +331,73 @@ show_current_ip() {
   if ip="$(get_ip_plain)"; then
     printf '当前 IP: %s\n' "$ip"
   fi
+}
+
+extract_script_version() {
+  local file="$1"
+
+  python3 - "$file" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8", errors="ignore")
+match = re.search(r'^VERSION=["\']?([^"\']+)["\']?', text, re.MULTILINE)
+print(match.group(1) if match else "未知")
+PY
+}
+
+self_update() {
+  local target target_dir tmp_file new_version
+
+  target="$(current_script_path)"
+  target_dir="$(dirname "$target")"
+
+  printf '当前版本: %s\n' "$VERSION"
+  printf '更新地址: %s\n' "$UPDATE_URL"
+  printf '安装目标: %s\n\n' "$target"
+
+  if [ ! -e "$target" ]; then
+    printf '更新失败: 找不到当前脚本文件。\n'
+    return 1
+  fi
+
+  if [ ! -w "$target" ] || [ ! -w "$target_dir" ]; then
+    printf '更新失败: 没有写入权限。\n'
+    printf '请使用 root 运行 boil，或重新执行在线安装命令:\n'
+    printf 'curl -fsSL https://raw.githubusercontent.com/chnnic/Boil-Change-IP/main/install-online.sh | bash\n'
+    return 1
+  fi
+
+  tmp_file="$(mktemp)" || {
+    printf '更新失败: 无法创建临时文件。\n'
+    return 1
+  }
+
+  printf '正在从 GitHub 下载最新版...\n'
+  if ! curl -fsSL --noproxy '*' --connect-timeout 10 --max-time 30 "$UPDATE_URL" -o "$tmp_file"; then
+    rm -f "$tmp_file"
+    printf '更新失败: 下载失败。\n'
+    return 1
+  fi
+
+  if ! bash -n "$tmp_file"; then
+    rm -f "$tmp_file"
+    printf '更新失败: 下载到的脚本语法校验未通过，已取消覆盖。\n'
+    return 1
+  fi
+
+  new_version="$(extract_script_version "$tmp_file")"
+
+  if ! install -m 0755 "$tmp_file" "$target"; then
+    rm -f "$tmp_file"
+    printf '更新失败: 写入目标文件失败。\n'
+    return 1
+  fi
+
+  rm -f "$tmp_file"
+  printf '更新完成: %s\n' "$new_version"
 }
 
 trim_text() {
@@ -604,7 +696,7 @@ clear_screen() {
 
 print_header() {
   printf '========================================\n'
-  printf ' Boil Change IP 菜单\n'
+  printf ' Boil Change IP 菜单 %s\n' "$VERSION"
   printf '========================================\n'
   show_token_status
   show_cached_quota
@@ -626,6 +718,7 @@ menu_loop() {
 6) 设置/更新 API Token
 7) 查看 Token 保存位置
 8) 删除已保存 Token
+9) 更新脚本（从 GitHub 拉取）
 0) 退出
 EOF
     printf '\n请选择: '
@@ -666,6 +759,10 @@ EOF
         remove_token
         pause_screen
         ;;
+      9)
+        self_update
+        pause_screen
+        ;;
       0|q|Q)
         printf '已退出。\n'
         exit 0
@@ -697,20 +794,26 @@ remove_token() {
 }
 
 print_help() {
-  cat <<'EOF'
-Boil Change IP
+  cat <<EOF
+Boil Change IP $VERSION
 
 运行:
   boil
 
 说明:
-  默认进入菜单，可在菜单中查询 IP、查询 IP 质量、更换 IP、保存 Token、查看剩余次数缓存。
+  默认进入菜单，可在菜单中查询 IP、查询 IP 质量、更换 IP、保存 Token、查看剩余次数缓存、从 GitHub 更新脚本。
+
+命令:
+  boil              打开菜单
+  boil update       从 GitHub 拉取最新版并覆盖本地脚本
+  boil version      显示版本号
 
 环境变量:
   BOIL_TOKEN       临时指定 API Token，不读取 Token 文件
   BOIL_TOKEN_FILE  指定 Token 文件
   BOIL_STATE_FILE  指定状态缓存文件
   BOIL_API_BASE    指定 API 地址，默认 https://ippanel.boil.network/api/v1
+  BOIL_UPDATE_URL  指定更新下载地址
 EOF
 }
 
@@ -720,6 +823,12 @@ main() {
   case "${1:-}" in
     -h|--help|help)
       print_help
+      ;;
+    -v|--version|version)
+      printf '%s\n' "$VERSION"
+      ;;
+    update|self-update)
+      self_update
       ;;
     *)
       menu_loop

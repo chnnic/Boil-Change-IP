@@ -2,6 +2,8 @@
 
 Boil 家宽 IP API 菜单工具。安装后直接输入 `boil` 打开菜单，不需要反复记忆和输入 API 命令。
 
+当前版本：`V1.0.1`
+
 API 文档来源：<https://cloud.boil.network/tutorial.php#api>
 
 ## 功能
@@ -13,6 +15,7 @@ API 文档来源：<https://cloud.boil.network/tutorial.php#api>
 - 显示下次可更换 IP 的时间
 - 本地保存 API Token
 - 安装为系统命令 `boil`
+- 从 GitHub 拉取更新
 - 菜单式操作，适合新手使用
 
 ## 安装
@@ -93,6 +96,7 @@ boil
 6) 设置/更新 API Token
 7) 查看 Token 保存位置
 8) 删除已保存 Token
+9) 更新脚本（从 GitHub 拉取）
 0) 退出
 ```
 
@@ -117,6 +121,28 @@ IP 质量查询不会使用 ping0.cc 数据。
 - DNSBL 本地查询：Spamhaus ZEN、Spamcop、SORBS、Barracuda
 
 说明：IP 质量结果仅供参考。不同平台的风控规则不同，检测结果不能保证账号、支付、注册、直播或电商场景一定可用。
+
+## 更新脚本
+
+进入菜单后选择：
+
+```text
+9) 更新脚本（从 GitHub 拉取）
+```
+
+脚本会从 GitHub 下载最新版，先做语法校验，再覆盖本地 `boil` 命令。
+
+也可以直接运行：
+
+```bash
+boil update
+```
+
+查看当前版本：
+
+```bash
+boil version
+```
 
 ## 获取 API Token
 
