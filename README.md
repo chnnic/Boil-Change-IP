@@ -2,7 +2,7 @@
 
 Boil 家宽 IP API 菜单工具。安装后直接输入 `boil` 打开菜单，不需要反复记忆和输入 API 命令。
 
-当前版本：`V1.0.3`
+当前版本：`V1.0.4`
 
 API 文档来源：<https://cloud.boil.network/tutorial.php#api>
 
@@ -16,6 +16,7 @@ API 文档来源：<https://cloud.boil.network/tutorial.php#api>
 - 本地保存 API Token
 - 安装为系统命令 `boil`
 - 从 GitHub 拉取更新
+- 集成 SSH-Hardening 的 DDNS 模块
 - 菜单式操作，适合新手使用
 
 ## 安装
@@ -129,6 +130,7 @@ boil
 7) 查看 Token 保存位置
 8) 删除已保存 Token
 9) 更新脚本（从 GitHub 拉取）
+10) DDNS 管理（SSH-Hardening 模块）
 0) 退出
 ```
 
@@ -179,6 +181,49 @@ boil update
 ```bash
 boil version
 ```
+
+## DDNS 管理
+
+菜单选择：
+
+```text
+10) DDNS 管理（SSH-Hardening 模块）
+```
+
+这个入口会复用 `SSH-Hardening` 的 DDNS 模块，支持 Cloudflare 和华为云 DNS。
+
+调用逻辑：
+
+1. 如果系统已经安装 `SSH-Hardening`，会优先调用已有入口：
+   - `/usr/local/bin/vps-tools --ddns-menu`
+   - `/usr/local/bin/v --ddns-menu`
+   - `/usr/local/bin/V --ddns-menu`
+2. 如果系统没有安装 `SSH-Hardening`，Boil 会只下载一个 DDNS 管理入口到：
+   - root 用户：`/usr/local/lib/boil/ssh-hardening-ddns.sh`
+   - 普通用户：`~/.local/share/boil/ssh-hardening-ddns.sh`
+3. 这个方式不会创建 `vps-tools`、`v`、`V` 主命令，只用于进入 DDNS 菜单或配置 DDNS。
+
+也可以直接运行：
+
+```bash
+boil ddns
+```
+
+只安装并配置 DDNS 模块：
+
+```bash
+boil ddns-install
+```
+
+DDNS 模块会使用 `SSH-Hardening` 的原有文件路径：
+
+- DDNS 执行脚本：`/root/ddns.sh`
+- Cloudflare Token：`/root/.cf_token`
+- 华为云 AK/SK：`/root/.hw_dns_aksk`
+- DDNS 配置：`/root/.cf_zone`
+- DDNS 日志：`/var/log/ddns.log`
+
+DDNS 模块来源：<https://github.com/chnnic/SSH-Hardening>
 
 ## 获取 API Token
 

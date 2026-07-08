@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -u
 
-VERSION="V1.0.3"
+VERSION="V1.0.4"
 API_BASE="${BOIL_API_BASE:-https://ippanel.boil.network/api/v1}"
 UPDATE_URL="${BOIL_UPDATE_URL:-https://raw.githubusercontent.com/chnnic/Boil-Change-IP/main/boil}"
+SSH_HARDENING_DDNS_URL="${BOIL_DDNS_URL:-https://raw.githubusercontent.com/chnnic/SSH-Hardening/refs/heads/main/SSH-Hardening.sh}"
 SYSTEM_DIR="/etc/boil"
 SYSTEM_TOKEN_FILE="$SYSTEM_DIR/token"
 SYSTEM_STATE_FILE="$SYSTEM_DIR/state.json"
@@ -26,6 +27,10 @@ user_config_dir() {
 
 user_state_dir() {
   printf '%s\n' "${XDG_STATE_HOME:-${HOME:-/tmp}/.local/state}/boil"
+}
+
+user_data_dir() {
+  printf '%s\n' "${XDG_DATA_HOME:-${HOME:-/tmp}/.local/share}/boil"
 }
 
 current_script_path() {
@@ -68,6 +73,16 @@ state_file() {
     printf '%s\n' "$SYSTEM_STATE_FILE"
   else
     printf '%s/state.json\n' "$(user_state_dir)"
+  fi
+}
+
+ddns_helper_file() {
+  if [ -n "${BOIL_DDNS_HELPER:-}" ]; then
+    printf '%s\n' "$BOIL_DDNS_HELPER"
+  elif [ "$(id -u)" -eq 0 ]; then
+    printf '%s\n' "/usr/local/lib/boil/ssh-hardening-ddns.sh"
+  else
+    printf '%s/ssh-hardening-ddns.sh\n' "$(user_data_dir)"
   fi
 }
 
@@ -416,6 +431,145 @@ self_update() {
   printf '更新完成: %s\n' "$new_version"
 }
 
+ddns_find_manager() {
+  local candidate
+
+  if [ "${BOIL_DDNS_FORCE_HELPER:-0}" != "1" ]; then
+    for candidate in \
+      "/usr/local/bin/vps-tools" \
+      "/usr/local/bin/v" \
+      "/usr/local/bin/V" \
+      "$(command -v vps-tools 2>/dev/null || true)" \
+      "$(command -v v 2>/dev/null || true)" \
+      "$(command -v V 2>/dev/null || true)"; do
+      [ -n "$candidate" ] || continue
+      [ -f "$candidate" ] || continue
+      if grep -q -- "--ddns-menu" "$candidate" 2>/dev/null; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
+  fi
+
+  candidate="$(ddns_helper_file)"
+  if [ -f "$candidate" ] && grep -q -- "--ddns-menu" "$candidate" 2>/dev/null; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  return 1
+}
+
+ddns_install_helper() {
+  local target target_dir tmp_file download_url
+
+  target="$(ddns_helper_file)"
+  target_dir="$(dirname "$target")"
+  download_url="$(update_download_url "$SSH_HARDENING_DDNS_URL")"
+
+  mkdir -p "$target_dir" 2>/dev/null || {
+    printf '无法创建目录: %s\n' "$target_dir"
+    return 1
+  }
+
+  if [ ! -w "$target_dir" ]; then
+    printf '没有写入权限: %s\n' "$target_dir"
+    printf '请使用 root 运行，或设置 BOIL_DDNS_HELPER 指向可写路径。\n'
+    return 1
+  fi
+
+  tmp_file="$(mktemp)" || {
+    printf '无法创建临时文件。\n'
+    return 1
+  }
+
+  printf '正在下载 SSH-Hardening DDNS 模块入口...\n'
+  printf '来源: %s\n' "$SSH_HARDENING_DDNS_URL"
+  if ! curl -fsSL --noproxy '*' --connect-timeout 10 --max-time 45 "$download_url" -o "$tmp_file"; then
+    rm -f "$tmp_file"
+    printf '下载失败。\n'
+    return 1
+  fi
+
+  if ! bash -n "$tmp_file"; then
+    rm -f "$tmp_file"
+    printf '下载到的脚本语法校验失败，已取消安装。\n'
+    return 1
+  fi
+
+  if ! grep -q -- "--ddns-menu" "$tmp_file" 2>/dev/null; then
+    rm -f "$tmp_file"
+    printf '下载到的脚本不包含 DDNS 菜单入口，已取消安装。\n'
+    return 1
+  fi
+
+  if ! install -m 0755 "$tmp_file" "$target"; then
+    rm -f "$tmp_file"
+    printf '写入 DDNS 管理入口失败: %s\n' "$target"
+    return 1
+  fi
+
+  rm -f "$tmp_file"
+  printf 'DDNS 管理入口已安装: %s\n' "$target"
+}
+
+ddns_run_manager() {
+  local mode="${1:-menu}"
+  local manager
+
+  manager="$(ddns_find_manager)" || return 1
+  printf '调用 DDNS 管理入口: %s\n\n' "$manager"
+  case "$mode" in
+    install) bash "$manager" --ddns-install ;;
+    run) bash "$manager" --ddns-run ;;
+    status) bash "$manager" --ddns-status ;;
+    log) bash "$manager" --ddns-log ;;
+    *) bash "$manager" --ddns-menu ;;
+  esac
+}
+
+ddns_module_menu() {
+  local choice
+
+  if ddns_find_manager >/dev/null 2>&1; then
+    ddns_run_manager menu
+    return $?
+  fi
+
+  printf '未检测到已安装的 SSH-Hardening DDNS 管理入口。\n'
+  if [ -f /root/ddns.sh ]; then
+    printf '检测到已有 DDNS 执行脚本: /root/ddns.sh\n'
+    printf '可以安装管理入口后继续管理现有 DDNS 配置。\n'
+  else
+    printf '可以只安装 DDNS 模块入口，不安装 SSH-Hardening 主命令 vps-tools/v/V。\n'
+  fi
+  printf '\n'
+  cat <<'EOF'
+1) 安装 DDNS 管理入口并打开 DDNS 菜单
+2) 安装 DDNS 管理入口并直接开始配置 DDNS
+0) 返回主菜单
+EOF
+  printf '\n请选择: '
+  IFS= read -r choice
+  printf '\n'
+
+  case "$choice" in
+    1)
+      ddns_install_helper && ddns_run_manager menu
+      ;;
+    2)
+      ddns_install_helper && ddns_run_manager install
+      ;;
+    0|q|Q|"")
+      return 0
+      ;;
+    *)
+      printf '无效选择。\n'
+      return 1
+      ;;
+  esac
+}
+
 trim_text() {
   python3 -c 'import sys; print(sys.stdin.read().strip())'
 }
@@ -735,6 +889,7 @@ menu_loop() {
 7) 查看 Token 保存位置
 8) 删除已保存 Token
 9) 更新脚本（从 GitHub 拉取）
+10) DDNS 管理（SSH-Hardening 模块）
 0) 退出
 EOF
     printf '\n请选择: '
@@ -777,6 +932,10 @@ EOF
         ;;
       9)
         self_update
+        pause_screen
+        ;;
+      10)
+        ddns_module_menu
         pause_screen
         ;;
       0|q|Q)
@@ -823,6 +982,8 @@ Boil Change IP $VERSION
   boil              打开菜单
   boil update       从 GitHub 拉取最新版并覆盖本地脚本
   boil version      显示版本号
+  boil ddns         打开 SSH-Hardening DDNS 菜单
+  boil ddns-install 只安装/配置 DDNS 模块
 
 环境变量:
   BOIL_TOKEN       临时指定 API Token，不读取 Token 文件
@@ -830,6 +991,8 @@ Boil Change IP $VERSION
   BOIL_STATE_FILE  指定状态缓存文件
   BOIL_API_BASE    指定 API 地址，默认 https://ippanel.boil.network/api/v1
   BOIL_UPDATE_URL  指定更新下载地址
+  BOIL_DDNS_URL    指定 SSH-Hardening DDNS 入口下载地址
+  BOIL_DDNS_HELPER 指定 DDNS 管理入口保存路径
 EOF
 }
 
@@ -845,6 +1008,18 @@ main() {
       ;;
     update|self-update)
       self_update
+      ;;
+    ddns)
+      ddns_module_menu
+      ;;
+    ddns-install)
+      if ! ddns_find_manager >/dev/null 2>&1; then
+        ddns_install_helper || exit $?
+      fi
+      ddns_run_manager install
+      ;;
+    ddns-run)
+      ddns_run_manager run
       ;;
     *)
       menu_loop
