@@ -2,7 +2,7 @@
 
 Boil 家宽 IP API 菜单工具。安装后直接输入 `boil` 打开菜单，不需要反复记忆和输入 API 命令。
 
-当前版本：`V1.0.1`
+当前版本：`V1.0.2`
 
 API 文档来源：<https://cloud.boil.network/tutorial.php#api>
 
@@ -101,6 +101,8 @@ boil
 ```
 
 首次使用请先选择 `6) 设置/更新 API Token`。
+
+输入 API Token 时会在屏幕上显示出来，粘贴后按 Enter 即可保存。
 
 ## IP 质量查询
 

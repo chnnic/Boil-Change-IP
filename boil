@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-VERSION="V1.0.1"
+VERSION="V1.0.2"
 API_BASE="${BOIL_API_BASE:-https://ippanel.boil.network/api/v1}"
 UPDATE_URL="${BOIL_UPDATE_URL:-https://raw.githubusercontent.com/chnnic/Boil-Change-IP/main/boil}"
 SYSTEM_DIR="/etc/boil"
@@ -125,11 +125,8 @@ save_token() {
 prompt_token() {
   local token
 
-  printf '请输入 Boil API Token: '
-  stty -echo 2>/dev/null || true
+  printf '请输入 Boil API Token（输入会显示，粘贴后按 Enter）: '
   IFS= read -r token
-  stty echo 2>/dev/null || true
-  printf '\n'
 
   if [ -z "$token" ]; then
     printf 'Token 不能为空。\n'
