@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-VERSION="V1.0.2"
+VERSION="V1.0.3"
 API_BASE="${BOIL_API_BASE:-https://ippanel.boil.network/api/v1}"
 UPDATE_URL="${BOIL_UPDATE_URL:-https://raw.githubusercontent.com/chnnic/Boil-Change-IP/main/boil}"
 SYSTEM_DIR="/etc/boil"
@@ -345,11 +345,30 @@ print(match.group(1) if match else "未知")
 PY
 }
 
+update_download_url() {
+  local url="$1"
+  local stamp
+
+  stamp="$(date +%s)"
+  case "$url" in
+    http://*|https://*)
+      case "$url" in
+        *\?*) printf '%s&cache=%s\n' "$url" "$stamp" ;;
+        *) printf '%s?cache=%s\n' "$url" "$stamp" ;;
+      esac
+      ;;
+    *)
+      printf '%s\n' "$url"
+      ;;
+  esac
+}
+
 self_update() {
-  local target target_dir tmp_file new_version
+  local target target_dir tmp_file new_version download_url
 
   target="$(current_script_path)"
   target_dir="$(dirname "$target")"
+  download_url="$(update_download_url "$UPDATE_URL")"
 
   printf '当前版本: %s\n' "$VERSION"
   printf '更新地址: %s\n' "$UPDATE_URL"
@@ -373,7 +392,7 @@ self_update() {
   }
 
   printf '正在从 GitHub 下载最新版...\n'
-  if ! curl -fsSL --noproxy '*' --connect-timeout 10 --max-time 30 "$UPDATE_URL" -o "$tmp_file"; then
+  if ! curl -fsSL --noproxy '*' --connect-timeout 10 --max-time 30 "$download_url" -o "$tmp_file"; then
     rm -f "$tmp_file"
     printf '更新失败: 下载失败。\n'
     return 1

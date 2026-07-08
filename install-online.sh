@@ -4,6 +4,10 @@ set -euo pipefail
 RAW_BASE="${BOIL_INSTALL_RAW_BASE:-https://raw.githubusercontent.com/chnnic/Boil-Change-IP/main}"
 SOURCE_URL="$RAW_BASE/boil"
 
+case "$SOURCE_URL" in
+  http://*|https://*) SOURCE_URL="$SOURCE_URL?cache=$(date +%s)" ;;
+esac
+
 if [ "$(id -u)" -eq 0 ]; then
   INSTALL_DIR="/usr/local/bin"
   CONFIG_DIR="/etc/boil"
