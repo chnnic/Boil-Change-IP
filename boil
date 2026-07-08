@@ -1,0 +1,520 @@
+#!/usr/bin/env bash
+set -u
+
+API_BASE="${BOIL_API_BASE:-https://ippanel.boil.network/api/v1}"
+SYSTEM_DIR="/etc/boil"
+SYSTEM_TOKEN_FILE="$SYSTEM_DIR/token"
+SYSTEM_STATE_FILE="$SYSTEM_DIR/state.json"
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf '缺少依赖: %s\n' "$1" >&2
+    exit 1
+  fi
+}
+
+require_deps() {
+  require_command curl
+  require_command python3
+}
+
+user_config_dir() {
+  printf '%s\n' "${XDG_CONFIG_HOME:-${HOME:-/tmp}/.config}/boil"
+}
+
+user_state_dir() {
+  printf '%s\n' "${XDG_STATE_HOME:-${HOME:-/tmp}/.local/state}/boil"
+}
+
+token_file() {
+  if [ -n "${BOIL_TOKEN_FILE:-}" ]; then
+    printf '%s\n' "$BOIL_TOKEN_FILE"
+  elif [ -r "$SYSTEM_TOKEN_FILE" ] || [ "$(id -u)" -eq 0 ]; then
+    printf '%s\n' "$SYSTEM_TOKEN_FILE"
+  else
+    printf '%s/token\n' "$(user_config_dir)"
+  fi
+}
+
+state_file() {
+  if [ -n "${BOIL_STATE_FILE:-}" ]; then
+    printf '%s\n' "$BOIL_STATE_FILE"
+  elif [ -r "$SYSTEM_STATE_FILE" ] || [ "$(id -u)" -eq 0 ]; then
+    printf '%s\n' "$SYSTEM_STATE_FILE"
+  else
+    printf '%s/state.json\n' "$(user_state_dir)"
+  fi
+}
+
+read_token() {
+  if [ -n "${BOIL_TOKEN:-}" ]; then
+    printf '%s\n' "$BOIL_TOKEN"
+    return 0
+  fi
+
+  local file
+  file="$(token_file)"
+  [ -r "$file" ] || return 1
+
+  python3 - "$file" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+for line in path.read_text(encoding="utf-8").splitlines():
+    value = line.strip()
+    if value:
+        print(value)
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+mask_token() {
+  local token="$1"
+  local length=${#token}
+
+  if [ "$length" -le 8 ]; then
+    printf '****\n'
+  else
+    printf '%s****%s\n' "${token:0:4}" "${token: -4}"
+  fi
+}
+
+save_token() {
+  local token="$1"
+  local file dir
+
+  file="$(token_file)"
+  dir="$(dirname "$file")"
+  mkdir -p "$dir"
+  chmod 700 "$dir" 2>/dev/null || true
+
+  umask 077
+  printf '%s\n' "$token" >"$file"
+  chmod 600 "$file" 2>/dev/null || true
+
+  printf 'API Token 已保存到: %s\n' "$file"
+}
+
+prompt_token() {
+  local token
+
+  printf '请输入 Boil API Token: '
+  stty -echo 2>/dev/null || true
+  IFS= read -r token
+  stty echo 2>/dev/null || true
+  printf '\n'
+
+  if [ -z "$token" ]; then
+    printf 'Token 不能为空。\n'
+    return 1
+  fi
+
+  save_token "$token"
+}
+
+json_value() {
+  local key="$1"
+
+  JSON_KEY="$key" python3 -c '
+import json
+import os
+import sys
+
+key = os.environ["JSON_KEY"]
+try:
+    data = json.load(sys.stdin)
+    value = data
+    for part in key.split("."):
+        value = value[part]
+except Exception:
+    raise SystemExit(1)
+
+if value is None:
+    raise SystemExit(1)
+if isinstance(value, bool):
+    print("true" if value else "false")
+else:
+    print(value)
+'
+}
+
+format_time() {
+  local value="$1"
+
+  if [ -z "$value" ]; then
+    return 1
+  fi
+
+  python3 - "$value" <<'PY'
+from datetime import datetime
+import sys
+
+value = sys.argv[1]
+try:
+    ts = int(float(value))
+except Exception:
+    print(value)
+else:
+    print(datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S"))
+PY
+}
+
+api_post() {
+  local endpoint="$1"
+  local token
+
+  if ! token="$(read_token)"; then
+    printf '还没有保存 API Token，请先在菜单中选择“设置/更新 API Token”。\n' >&2
+    return 2
+  fi
+
+  curl -sS -X POST -H "Authorization: Bearer $token" "$API_BASE/$endpoint"
+}
+
+is_ok_response() {
+  local body="$1"
+  local ok
+
+  ok="$(printf '%s' "$body" | json_value ok 2>/dev/null || true)"
+  [ "$ok" = "true" ]
+}
+
+error_message() {
+  local body="$1"
+  local error
+
+  error="$(printf '%s' "$body" | json_value error 2>/dev/null || true)"
+  if [ -n "$error" ]; then
+    printf '%s\n' "$error"
+  else
+    printf '%s\n' "$body"
+  fi
+}
+
+cache_change_response() {
+  local body="$1"
+  local file dir
+
+  file="$(state_file)"
+  dir="$(dirname "$file")"
+  mkdir -p "$dir"
+  chmod 700 "$dir" 2>/dev/null || true
+
+  python3 - "$file" "$body" <<'PY'
+from datetime import datetime
+from pathlib import Path
+import json
+import sys
+
+path = Path(sys.argv[1])
+body = sys.argv[2]
+
+try:
+    payload = json.loads(body)
+except Exception:
+    raise SystemExit(0)
+
+state = {}
+if path.exists():
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        state = {}
+
+state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+if payload.get("ok") is True:
+    state.pop("last_error", None)
+    if "uses_left" in payload:
+        state["uses_left"] = payload["uses_left"]
+    if "next_allowed_at" in payload:
+        state["next_allowed_at"] = payload["next_allowed_at"]
+elif "error" in payload:
+    state["last_error"] = payload["error"]
+
+path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
+  chmod 600 "$file" 2>/dev/null || true
+}
+
+show_cached_quota() {
+  local file
+  file="$(state_file)"
+
+  if [ ! -r "$file" ]; then
+    printf 'API 剩余次数: 未知（成功换 IP 后会自动缓存）\n'
+    return 0
+  fi
+
+  python3 - "$file" <<'PY'
+from datetime import datetime
+from pathlib import Path
+import json
+import sys
+
+path = Path(sys.argv[1])
+try:
+    state = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    print("API 剩余次数: 未知（缓存文件读取失败）")
+    raise SystemExit(0)
+
+uses_left = state.get("uses_left")
+if uses_left is None:
+    print("API 剩余次数: 未知（成功换 IP 后会自动缓存）")
+else:
+    print(f"API 剩余次数: {uses_left}")
+
+next_allowed_at = state.get("next_allowed_at")
+if next_allowed_at:
+    try:
+        readable = datetime.fromtimestamp(int(next_allowed_at)).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        readable = str(next_allowed_at)
+    print(f"下次可换 IP 时间: {readable}")
+
+if state.get("updated_at"):
+    print(f"次数更新时间: {state['updated_at']}")
+if state.get("last_error"):
+    print(f"上次错误: {state['last_error']}")
+PY
+}
+
+get_ip_plain() {
+  local body ip
+
+  body="$(api_post getIP)" || return $?
+  if ! is_ok_response "$body"; then
+    printf '查询失败: %s\n' "$(error_message "$body")" >&2
+    return 1
+  fi
+
+  ip="$(printf '%s' "$body" | json_value ip 2>/dev/null || true)"
+  if [ -z "$ip" ]; then
+    printf '查询失败: API 返回中没有 ip 字段。\n' >&2
+    return 1
+  fi
+
+  printf '%s\n' "$ip"
+}
+
+show_current_ip() {
+  local ip
+
+  if ip="$(get_ip_plain)"; then
+    printf '当前 IP: %s\n' "$ip"
+  fi
+}
+
+change_ip() {
+  local wait_for_change="${1:-0}"
+  local old_ip new_ip body message uses_left next_allowed_at readable start now
+
+  if [ "$wait_for_change" = "1" ]; then
+    old_ip="$(get_ip_plain 2>/dev/null || true)"
+  fi
+
+  body="$(api_post changeIP/)" || return $?
+  cache_change_response "$body"
+
+  if ! is_ok_response "$body"; then
+    printf '换 IP 失败: %s\n' "$(error_message "$body")"
+    return 1
+  fi
+
+  message="$(printf '%s' "$body" | json_value message 2>/dev/null || true)"
+  uses_left="$(printf '%s' "$body" | json_value uses_left 2>/dev/null || true)"
+  next_allowed_at="$(printf '%s' "$body" | json_value next_allowed_at 2>/dev/null || true)"
+
+  if [ -n "$message" ]; then
+    printf '%s\n' "$message"
+  else
+    printf '已提交更换 IP 请求。\n'
+  fi
+
+  if [ -n "$uses_left" ]; then
+    printf 'API 剩余次数: %s\n' "$uses_left"
+  fi
+
+  if [ -n "$next_allowed_at" ]; then
+    readable="$(format_time "$next_allowed_at")"
+    printf '下次可换 IP 时间: %s\n' "$readable"
+  fi
+
+  if [ "$wait_for_change" != "1" ]; then
+    return 0
+  fi
+
+  printf '等待 IP 变化'
+  start="$(date +%s)"
+  while true; do
+    sleep 3
+    printf '.'
+    new_ip="$(get_ip_plain 2>/dev/null || true)"
+
+    if [ -n "$new_ip" ] && [ "$new_ip" != "$old_ip" ]; then
+      printf '\n新的 IP: %s\n' "$new_ip"
+      return 0
+    fi
+
+    now="$(date +%s)"
+    if [ $((now - start)) -ge 90 ]; then
+      printf '\n等待超时，请稍后在菜单中查询当前 IP。\n'
+      return 0
+    fi
+  done
+}
+
+show_token_status() {
+  local token file
+
+  file="$(token_file)"
+  if token="$(read_token 2>/dev/null)"; then
+    printf 'Token 状态: 已保存（%s）\n' "$(mask_token "$token")"
+    if [ -n "${BOIL_TOKEN:-}" ]; then
+      printf 'Token 来源: 环境变量 BOIL_TOKEN\n'
+    else
+      printf 'Token 文件: %s\n' "$file"
+    fi
+  else
+    printf 'Token 状态: 未设置\n'
+    printf 'Token 文件: %s\n' "$file"
+  fi
+}
+
+pause_screen() {
+  printf '\n按 Enter 返回菜单...'
+  IFS= read -r _
+}
+
+clear_screen() {
+  if command -v clear >/dev/null 2>&1; then
+    clear
+  else
+    printf '\033c'
+  fi
+}
+
+print_header() {
+  printf '========================================\n'
+  printf ' Boil Change IP 菜单\n'
+  printf '========================================\n'
+  show_token_status
+  show_cached_quota
+  printf '%s\n' '----------------------------------------'
+}
+
+menu_loop() {
+  local choice
+
+  while true; do
+    clear_screen
+    print_header
+    cat <<'EOF'
+1) 查询当前 IP
+2) 更换 IP
+3) 更换 IP 并等待新 IP
+4) 查看 API 剩余次数缓存
+5) 设置/更新 API Token
+6) 查看 Token 保存位置
+7) 删除已保存 Token
+0) 退出
+EOF
+    printf '\n请选择: '
+    IFS= read -r choice
+    printf '\n'
+
+    case "$choice" in
+      1)
+        show_current_ip
+        pause_screen
+        ;;
+      2)
+        change_ip 0
+        pause_screen
+        ;;
+      3)
+        change_ip 1
+        pause_screen
+        ;;
+      4)
+        show_cached_quota
+        pause_screen
+        ;;
+      5)
+        prompt_token
+        pause_screen
+        ;;
+      6)
+        printf 'Token 文件: %s\n' "$(token_file)"
+        printf '状态缓存: %s\n' "$(state_file)"
+        pause_screen
+        ;;
+      7)
+        remove_token
+        pause_screen
+        ;;
+      0|q|Q)
+        printf '已退出。\n'
+        exit 0
+        ;;
+      *)
+        printf '无效选择。\n'
+        pause_screen
+        ;;
+    esac
+  done
+}
+
+remove_token() {
+  local file
+
+  if [ -n "${BOIL_TOKEN:-}" ]; then
+    printf '当前使用的是环境变量 BOIL_TOKEN，脚本不会删除环境变量。\n'
+    return 0
+  fi
+
+  file="$(token_file)"
+  if [ ! -e "$file" ]; then
+    printf 'Token 文件不存在: %s\n' "$file"
+    return 0
+  fi
+
+  rm -f "$file"
+  printf '已删除 Token 文件: %s\n' "$file"
+}
+
+print_help() {
+  cat <<'EOF'
+Boil Change IP
+
+运行:
+  boil
+
+说明:
+  默认进入菜单，可在菜单中查询 IP、更换 IP、保存 Token、查看剩余次数缓存。
+
+环境变量:
+  BOIL_TOKEN       临时指定 API Token，不读取 Token 文件
+  BOIL_TOKEN_FILE  指定 Token 文件
+  BOIL_STATE_FILE  指定状态缓存文件
+  BOIL_API_BASE    指定 API 地址，默认 https://ippanel.boil.network/api/v1
+EOF
+}
+
+main() {
+  require_deps
+
+  case "${1:-}" in
+    -h|--help|help)
+      print_help
+      ;;
+    *)
+      menu_loop
+      ;;
+  esac
+}
+
+main "$@"
