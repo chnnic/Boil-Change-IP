@@ -16,7 +16,33 @@ API 文档来源：<https://cloud.boil.network/tutorial.php#api>
 
 ## 安装
 
-### 方式一：一键下载并安装
+### 方式一：不安装 git，直接在线安装
+
+大多数 VPS 可以直接运行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/chnnic/Boil-Change-IP/main/install-online.sh | bash
+```
+
+如果提示 `curl: command not found`，先安装依赖：
+
+```bash
+apt update && apt install -y curl python3 ca-certificates
+```
+
+CentOS/RHEL 系统可以使用：
+
+```bash
+yum install -y curl python3 ca-certificates
+```
+
+安装完成后运行：
+
+```bash
+boil
+```
+
+### 方式二：使用 git 下载并安装
 
 ```bash
 git clone https://github.com/chnnic/Boil-Change-IP.git
@@ -30,7 +56,15 @@ sudo bash install.sh
 boil
 ```
 
-### 方式二：不安装，直接运行
+如果提示 `git: command not found`，说明服务器没有安装 Git。可以先安装 Git：
+
+```bash
+apt update && apt install -y git curl python3 ca-certificates
+```
+
+或者直接使用上面的“方式一”在线安装。
+
+### 方式三：不安装，直接运行
 
 ```bash
 git clone https://github.com/chnnic/Boil-Change-IP.git
