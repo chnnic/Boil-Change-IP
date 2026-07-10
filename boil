@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 set -u
 
-VERSION="V1.0.4"
+VERSION="V1.0.5"
 API_BASE="${BOIL_API_BASE:-https://ippanel.boil.network/api/v1}"
+IP_QUALITY_API_BASE="${BOIL_IP_QUALITY_API_BASE:-https://api.ipapi.is}"
 UPDATE_URL="${BOIL_UPDATE_URL:-https://raw.githubusercontent.com/chnnic/Boil-Change-IP/main/boil}"
-SSH_HARDENING_DDNS_URL="${BOIL_DDNS_URL:-https://raw.githubusercontent.com/chnnic/SSH-Hardening/refs/heads/main/SSH-Hardening.sh}"
+UPDATE_CHECKSUM_URL="${BOIL_UPDATE_CHECKSUM_URL:-https://raw.githubusercontent.com/chnnic/Boil-Change-IP/main/boil.sha256}"
+SSH_HARDENING_DDNS_URL="${BOIL_DDNS_URL:-https://raw.githubusercontent.com/chnnic/SSH-Hardening/9a9eb16af6b34963230964ee8a779bed6c6c4353/SSH-Hardening.sh}"
+SSH_HARDENING_DDNS_SHA256="${BOIL_DDNS_SHA256:-08e09be4ef88569ea2d25ff17a9479661a8dfafd0a2c2521f4ce57665fdcdd54}"
 SYSTEM_DIR="/etc/boil"
 SYSTEM_TOKEN_FILE="$SYSTEM_DIR/token"
 SYSTEM_STATE_FILE="$SYSTEM_DIR/state.json"
@@ -21,16 +24,23 @@ require_deps() {
   require_command python3
 }
 
+make_temp_file() {
+  local base="${TMPDIR:-/tmp}"
+
+  if [ ! -d "$base" ] || [ ! -w "$base" ]; then
+    base="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/boil"
+    mkdir -p "$base" || return 1
+    chmod 700 "$base" 2>/dev/null || true
+  fi
+  mktemp "$base/boil.XXXXXX"
+}
+
 user_config_dir() {
   printf '%s\n' "${XDG_CONFIG_HOME:-${HOME:-/tmp}/.config}/boil"
 }
 
 user_state_dir() {
   printf '%s\n' "${XDG_STATE_HOME:-${HOME:-/tmp}/.local/state}/boil"
-}
-
-user_data_dir() {
-  printf '%s\n' "${XDG_DATA_HOME:-${HOME:-/tmp}/.local/share}/boil"
 }
 
 current_script_path() {
@@ -73,16 +83,6 @@ state_file() {
     printf '%s\n' "$SYSTEM_STATE_FILE"
   else
     printf '%s/state.json\n' "$(user_state_dir)"
-  fi
-}
-
-ddns_helper_file() {
-  if [ -n "${BOIL_DDNS_HELPER:-}" ]; then
-    printf '%s\n' "$BOIL_DDNS_HELPER"
-  elif [ "$(id -u)" -eq 0 ]; then
-    printf '%s\n' "/usr/local/lib/boil/ssh-hardening-ddns.sh"
-  else
-    printf '%s/ssh-hardening-ddns.sh\n' "$(user_data_dir)"
   fi
 }
 
@@ -140,8 +140,9 @@ save_token() {
 prompt_token() {
   local token
 
-  printf '请输入 Boil API Token（输入会显示，粘贴后按 Enter）: '
-  IFS= read -r token
+  printf '请输入 Boil API Token（输入不会显示，粘贴后按 Enter）: '
+  IFS= read -rs token
+  printf '\n'
 
   if [ -z "$token" ]; then
     printf 'Token 不能为空。\n'
@@ -207,7 +208,11 @@ api_post() {
     return 2
   fi
 
-  curl -sS -X POST -H "Authorization: Bearer $token" "$API_BASE/$endpoint"
+  if ! curl -sS --connect-timeout 8 --max-time 20 -X POST \
+    -H "Authorization: Bearer $token" "$API_BASE/$endpoint"; then
+    printf 'Boil API 请求失败，请检查网络后重试。\n' >&2
+    return 1
+  fi
 }
 
 is_ok_response() {
@@ -378,12 +383,69 @@ update_download_url() {
   esac
 }
 
+sha256_file() {
+  local file="$1"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$file" | awk '{print $NF}'
+  else
+    python3 - "$file" <<'PY'
+from pathlib import Path
+import hashlib
+import sys
+
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+  fi
+}
+
+verify_sha256() {
+  local file="$1"
+  local expected="$2"
+  local actual
+
+  if ! [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    printf '校验失败: SHA256 格式无效。\n'
+    return 1
+  fi
+
+  actual="$(sha256_file "$file")" || return 1
+  if [ "${actual,,}" != "${expected,,}" ]; then
+    printf '校验失败: SHA256 不匹配。\n'
+    printf '期望: %s\n实际: %s\n' "$expected" "$actual"
+    return 1
+  fi
+}
+
+compare_versions() {
+  python3 - "$1" "$2" <<'PY'
+import re
+import sys
+
+def parse(value):
+    match = re.fullmatch(r"[vV]?(\d+)\.(\d+)\.(\d+)", value)
+    if not match:
+        raise SystemExit(2)
+    return tuple(map(int, match.groups()))
+
+current = parse(sys.argv[1])
+candidate = parse(sys.argv[2])
+print((candidate > current) - (candidate < current))
+PY
+}
+
 self_update() {
-  local target target_dir tmp_file new_version download_url
+  local target target_dir tmp_file checksum_file expected new_version version_order
+  local download_url checksum_download_url
 
   target="$(current_script_path)"
   target_dir="$(dirname "$target")"
   download_url="$(update_download_url "$UPDATE_URL")"
+  checksum_download_url="$(update_download_url "$UPDATE_CHECKSUM_URL")"
 
   printf '当前版本: %s\n' "$VERSION"
   printf '更新地址: %s\n' "$UPDATE_URL"
@@ -401,116 +463,109 @@ self_update() {
     return 1
   fi
 
-  tmp_file="$(mktemp)" || {
+  tmp_file="$(make_temp_file)" || {
     printf '更新失败: 无法创建临时文件。\n'
+    return 1
+  }
+  checksum_file="$(make_temp_file)" || {
+    rm -f "$tmp_file"
+    printf '更新失败: 无法创建校验临时文件。\n'
     return 1
   }
 
   printf '正在从 GitHub 下载最新版...\n'
   if ! curl -fsSL --noproxy '*' --connect-timeout 10 --max-time 30 "$download_url" -o "$tmp_file"; then
-    rm -f "$tmp_file"
+    rm -f "$tmp_file" "$checksum_file"
     printf '更新失败: 下载失败。\n'
     return 1
   fi
 
+  if ! curl -fsSL --noproxy '*' --connect-timeout 10 --max-time 30 "$checksum_download_url" -o "$checksum_file"; then
+    rm -f "$tmp_file" "$checksum_file"
+    printf '更新失败: 校验文件下载失败。\n'
+    return 1
+  fi
+
+  expected="$(awk 'NR == 1 {print $1}' "$checksum_file")"
+  if ! verify_sha256 "$tmp_file" "$expected"; then
+    rm -f "$tmp_file" "$checksum_file"
+    printf '更新失败: 文件完整性校验未通过。\n'
+    return 1
+  fi
+
   if ! bash -n "$tmp_file"; then
-    rm -f "$tmp_file"
+    rm -f "$tmp_file" "$checksum_file"
     printf '更新失败: 下载到的脚本语法校验未通过，已取消覆盖。\n'
     return 1
   fi
 
   new_version="$(extract_script_version "$tmp_file")"
+  version_order="$(compare_versions "$VERSION" "$new_version" 2>/dev/null || true)"
+  case "$version_order" in
+    1) ;;
+    0)
+      rm -f "$tmp_file" "$checksum_file"
+      printf '当前已经是最新版本: %s\n' "$VERSION"
+      return 0
+      ;;
+    -1)
+      rm -f "$tmp_file" "$checksum_file"
+      printf '更新失败: 拒绝从 %s 降级到 %s。\n' "$VERSION" "$new_version"
+      return 1
+      ;;
+    *)
+      rm -f "$tmp_file" "$checksum_file"
+      printf '更新失败: 无法识别远端版本号。\n'
+      return 1
+      ;;
+  esac
 
   if ! install -m 0755 "$tmp_file" "$target"; then
-    rm -f "$tmp_file"
+    rm -f "$tmp_file" "$checksum_file"
     printf '更新失败: 写入目标文件失败。\n'
     return 1
   fi
 
-  rm -f "$tmp_file"
+  rm -f "$tmp_file" "$checksum_file"
   printf '更新完成: %s\n' "$new_version"
 }
 
 ddns_find_manager() {
-  local candidate
+  local candidate resolved owner permissions
 
-  if [ "${BOIL_DDNS_FORCE_HELPER:-0}" != "1" ]; then
-    for candidate in \
-      "/usr/local/bin/vps-tools" \
-      "/usr/local/bin/v" \
-      "/usr/local/bin/V" \
-      "$(command -v vps-tools 2>/dev/null || true)" \
-      "$(command -v v 2>/dev/null || true)" \
-      "$(command -v V 2>/dev/null || true)"; do
-      [ -n "$candidate" ] || continue
-      [ -f "$candidate" ] || continue
-      if grep -q -- "--ddns-menu" "$candidate" 2>/dev/null; then
-        printf '%s\n' "$candidate"
-        return 0
-      fi
-    done
+  if [ "${BOIL_DDNS_FORCE_DOWNLOAD:-0}" = "1" ]; then
+    return 1
   fi
 
-  candidate="$(ddns_helper_file)"
-  if [ -f "$candidate" ] && grep -q -- "--ddns-menu" "$candidate" 2>/dev/null; then
-    printf '%s\n' "$candidate"
-    return 0
-  fi
+  for candidate in \
+    "/usr/local/bin/vps-tools" \
+    "/usr/local/bin/v" \
+    "/usr/local/bin/V"; do
+    [ -f "$candidate" ] || continue
+    resolved="$(realpath "$candidate" 2>/dev/null || readlink -f "$candidate" 2>/dev/null || true)"
+    if [ -z "$resolved" ] || [ ! -f "$resolved" ]; then
+      continue
+    fi
+    owner="$(stat -c '%u' "$resolved" 2>/dev/null || true)"
+    permissions="$(stat -c '%A' "$resolved" 2>/dev/null || true)"
+    [ "$owner" = "0" ] || continue
+    [ "${#permissions}" -ge 10 ] || continue
+    [ "${permissions:5:1}" != "w" ] || continue
+    [ "${permissions:8:1}" != "w" ] || continue
+    if grep -q -- "--ddns-menu" "$resolved" 2>/dev/null; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  done
 
   return 1
 }
 
-ddns_install_helper() {
-  local target target_dir tmp_file download_url
-
-  target="$(ddns_helper_file)"
-  target_dir="$(dirname "$target")"
-  download_url="$(update_download_url "$SSH_HARDENING_DDNS_URL")"
-
-  mkdir -p "$target_dir" 2>/dev/null || {
-    printf '无法创建目录: %s\n' "$target_dir"
-    return 1
-  }
-
-  if [ ! -w "$target_dir" ]; then
-    printf '没有写入权限: %s\n' "$target_dir"
-    printf '请使用 root 运行，或设置 BOIL_DDNS_HELPER 指向可写路径。\n'
+ddns_require_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    printf 'DDNS 管理需要 root 权限，请运行: sudo boil ddns\n'
     return 1
   fi
-
-  tmp_file="$(mktemp)" || {
-    printf '无法创建临时文件。\n'
-    return 1
-  }
-
-  printf '正在下载 SSH-Hardening DDNS 模块入口...\n'
-  printf '来源: %s\n' "$SSH_HARDENING_DDNS_URL"
-  if ! curl -fsSL --noproxy '*' --connect-timeout 10 --max-time 45 "$download_url" -o "$tmp_file"; then
-    rm -f "$tmp_file"
-    printf '下载失败。\n'
-    return 1
-  fi
-
-  if ! bash -n "$tmp_file"; then
-    rm -f "$tmp_file"
-    printf '下载到的脚本语法校验失败，已取消安装。\n'
-    return 1
-  fi
-
-  if ! grep -q -- "--ddns-menu" "$tmp_file" 2>/dev/null; then
-    rm -f "$tmp_file"
-    printf '下载到的脚本不包含 DDNS 菜单入口，已取消安装。\n'
-    return 1
-  fi
-
-  if ! install -m 0755 "$tmp_file" "$target"; then
-    rm -f "$tmp_file"
-    printf '写入 DDNS 管理入口失败: %s\n' "$target"
-    return 1
-  fi
-
-  rm -f "$tmp_file"
-  printf 'DDNS 管理入口已安装: %s\n' "$target"
 }
 
 ddns_run_manager() {
@@ -528,9 +583,57 @@ ddns_run_manager() {
   esac
 }
 
+ddns_run_downloaded_manager() {
+  local mode="${1:-menu}"
+  local tmp_file download_url actual result
+
+  ddns_require_root || return 1
+  download_url="$(update_download_url "$SSH_HARDENING_DDNS_URL")"
+  tmp_file="$(make_temp_file)" || {
+    printf '无法创建 DDNS 临时文件。\n'
+    return 1
+  }
+
+  printf '正在下载经过固定版本校验的 SSH-Hardening DDNS 管理器...\n'
+  if ! curl -fsSL --noproxy '*' --connect-timeout 10 --max-time 45 "$download_url" -o "$tmp_file"; then
+    rm -f "$tmp_file"
+    printf 'DDNS 管理器下载失败。\n'
+    return 1
+  fi
+
+  actual="$(sha256_file "$tmp_file")" || {
+    rm -f "$tmp_file"
+    printf '无法计算 DDNS 管理器 SHA256。\n'
+    return 1
+  }
+  if ! verify_sha256 "$tmp_file" "$SSH_HARDENING_DDNS_SHA256"; then
+    rm -f "$tmp_file"
+    printf 'DDNS 管理器完整性校验未通过。\n'
+    return 1
+  fi
+
+  if ! bash -n "$tmp_file" || ! grep -q -- "--ddns-menu" "$tmp_file" 2>/dev/null; then
+    rm -f "$tmp_file"
+    printf 'DDNS 管理器内容校验未通过。\n'
+    return 1
+  fi
+
+  printf 'DDNS 管理器 SHA256 校验通过: %s\n\n' "$actual"
+  case "$mode" in
+    install) bash "$tmp_file" --ddns-install; result=$? ;;
+    run) bash "$tmp_file" --ddns-run; result=$? ;;
+    status) bash "$tmp_file" --ddns-status; result=$? ;;
+    log) bash "$tmp_file" --ddns-log; result=$? ;;
+    *) bash "$tmp_file" --ddns-menu; result=$? ;;
+  esac
+  rm -f "$tmp_file"
+  return "$result"
+}
+
 ddns_module_menu() {
   local choice
 
+  ddns_require_root || return 1
   if ddns_find_manager >/dev/null 2>&1; then
     ddns_run_manager menu
     return $?
@@ -539,14 +642,17 @@ ddns_module_menu() {
   printf '未检测到已安装的 SSH-Hardening DDNS 管理入口。\n'
   if [ -f /root/ddns.sh ]; then
     printf '检测到已有 DDNS 执行脚本: /root/ddns.sh\n'
-    printf '可以安装管理入口后继续管理现有 DDNS 配置。\n'
+    printf '将临时下载已校验的管理器来管理现有配置。\n'
   else
-    printf '可以只安装 DDNS 模块入口，不安装 SSH-Hardening 主命令 vps-tools/v/V。\n'
+    printf '只会配置 DDNS 运行文件，不安装 SSH-Hardening 主命令 vps-tools/v/V。\n'
+  fi
+  if [ -f /usr/local/lib/boil/ssh-hardening-ddns.sh ]; then
+    printf '提示: 检测到 V1.0.4 遗留 helper，V1.0.5 不再执行它，可手动删除。\n'
   fi
   printf '\n'
   cat <<'EOF'
-1) 安装 DDNS 管理入口并打开 DDNS 菜单
-2) 安装 DDNS 管理入口并直接开始配置 DDNS
+1) 临时下载已校验管理器并打开 DDNS 菜单
+2) 临时下载已校验管理器并直接配置 DDNS
 0) 返回主菜单
 EOF
   printf '\n请选择: '
@@ -555,10 +661,10 @@ EOF
 
   case "$choice" in
     1)
-      ddns_install_helper && ddns_run_manager menu
+      ddns_run_downloaded_manager menu
       ;;
     2)
-      ddns_install_helper && ddns_run_manager install
+      ddns_run_downloaded_manager install
       ;;
     0|q|Q|"")
       return 0
@@ -601,6 +707,18 @@ bool_text() {
   esac
 }
 
+is_valid_ip() {
+  python3 - "$1" <<'PY'
+import ipaddress
+import sys
+
+try:
+    ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+PY
+}
+
 ip_quality_dnsbl_report() {
   local ip="$1"
 
@@ -622,16 +740,19 @@ try:
 except ValueError:
     print("DNSBL 检测: IP 格式无效，已跳过")
     print("__DNSBL_HITS__=0")
+    print("__DNSBL_CHECKED__=0")
     raise SystemExit(0)
 
 if ip.version != 4:
     print("DNSBL 检测: 仅支持 IPv4，IPv6 已跳过")
     print("__DNSBL_HITS__=0")
+    print("__DNSBL_CHECKED__=0")
     raise SystemExit(0)
 
 reverse = ".".join(reversed(str(ip).split(".")))
 socket.setdefaulttimeout(2)
 hits = 0
+checked = 0
 
 print("DNSBL 检测:")
 for label, zone in lists:
@@ -639,6 +760,7 @@ for label, zone in lists:
     try:
         _, _, addresses = socket.gethostbyname_ex(query)
     except socket.gaierror:
+        checked += 1
         print(f"  {label}: 未命中")
         continue
     except socket.timeout:
@@ -652,77 +774,99 @@ for label, zone in lists:
         print(f"  {label}: 查询受限")
         continue
 
+    checked += 1
     hits += 1
     print(f"  {label}: 命中 ({', '.join(addresses)})")
 
 print(f"DNSBL 命中数: {hits}/{len(lists)}")
 print(f"__DNSBL_HITS__={hits}")
+print(f"__DNSBL_CHECKED__={checked}")
 PY
 }
 
 print_ip_quality_result() {
   local ip="$1"
-  local body status error country region city isp org asn asname mobile proxy hosting
-  local dnsbl_report dnsbl_hits score level
+  local body api_ip country region city isp org asn company_type company_score asn_score
+  local mobile proxy vpn tor hosting abuser base_ok
+  local dnsbl_report dnsbl_hits dnsbl_checked score level
+
+  if ! is_valid_ip "$ip"; then
+    printf 'IP 格式无效: %s\n' "$ip"
+    return 1
+  fi
 
   printf 'IP 质量查询: %s\n' "$ip"
-  printf '数据源: ip-api.com + DNSBL，本工具未使用 ping0.cc 数据。\n\n'
+  printf '数据源: ipapi.is（HTTPS）+ DNSBL，本工具未使用 ping0.cc 数据。\n\n'
 
-  body="$(curl -sS --noproxy '*' --connect-timeout 8 --max-time 15 "http://ip-api.com/json/$ip?fields=status,message,query,country,regionName,city,isp,org,as,asname,mobile,proxy,hosting" 2>/dev/null || true)"
-  status="$(printf '%s' "$body" | json_value status 2>/dev/null || true)"
+  body="$(curl -fsS --noproxy '*' --connect-timeout 8 --max-time 15 "$IP_QUALITY_API_BASE/?q=$ip" 2>/dev/null || true)"
+  api_ip="$(printf '%s' "$body" | json_value ip 2>/dev/null || true)"
+  base_ok=0
 
-  if [ "$status" != "success" ]; then
-    error="$(printf '%s' "$body" | json_value message 2>/dev/null || true)"
-    if [ -n "$error" ]; then
-      printf '基础信息查询失败: %s\n\n' "$error"
-    else
-      printf '基础信息查询失败。\n\n'
-    fi
+  if [ -z "$api_ip" ]; then
+    printf '基础信息查询失败，质量标记暂时不可用。\n\n'
   else
-    country="$(printf '%s' "$body" | json_value country 2>/dev/null || true)"
-    region="$(printf '%s' "$body" | json_value regionName 2>/dev/null || true)"
-    city="$(printf '%s' "$body" | json_value city 2>/dev/null || true)"
-    isp="$(printf '%s' "$body" | json_value isp 2>/dev/null || true)"
-    org="$(printf '%s' "$body" | json_value org 2>/dev/null || true)"
-    asn="$(printf '%s' "$body" | json_value as 2>/dev/null || true)"
-    asname="$(printf '%s' "$body" | json_value asname 2>/dev/null || true)"
-    mobile="$(printf '%s' "$body" | json_value mobile 2>/dev/null || true)"
-    proxy="$(printf '%s' "$body" | json_value proxy 2>/dev/null || true)"
-    hosting="$(printf '%s' "$body" | json_value hosting 2>/dev/null || true)"
+    base_ok=1
+    country="$(printf '%s' "$body" | json_value location.country 2>/dev/null || true)"
+    region="$(printf '%s' "$body" | json_value location.state 2>/dev/null || true)"
+    city="$(printf '%s' "$body" | json_value location.city 2>/dev/null || true)"
+    isp="$(printf '%s' "$body" | json_value company.name 2>/dev/null || true)"
+    org="$(printf '%s' "$body" | json_value asn.org 2>/dev/null || true)"
+    asn="$(printf '%s' "$body" | json_value asn.asn 2>/dev/null || true)"
+    company_type="$(printf '%s' "$body" | json_value company.type 2>/dev/null || true)"
+    company_score="$(printf '%s' "$body" | json_value company.abuser_score 2>/dev/null || true)"
+    asn_score="$(printf '%s' "$body" | json_value asn.abuser_score 2>/dev/null || true)"
+    mobile="$(printf '%s' "$body" | json_value is_mobile 2>/dev/null || true)"
+    proxy="$(printf '%s' "$body" | json_value is_proxy 2>/dev/null || true)"
+    vpn="$(printf '%s' "$body" | json_value is_vpn 2>/dev/null || true)"
+    tor="$(printf '%s' "$body" | json_value is_tor 2>/dev/null || true)"
+    hosting="$(printf '%s' "$body" | json_value is_datacenter 2>/dev/null || true)"
+    abuser="$(printf '%s' "$body" | json_value is_abuser 2>/dev/null || true)"
 
     printf '位置: %s %s %s\n' "${country:-未知}" "${region:-}" "${city:-}"
-    printf 'ASN: %s\n' "${asn:-未知}"
-    if [ -n "$asname" ]; then
-      printf 'AS 名称: %s\n' "$asname"
-    fi
+    printf 'ASN: %s %s\n' "${asn:+AS$asn}" "${org:-未知}"
     printf 'ISP: %s\n' "${isp:-未知}"
-    printf '组织: %s\n' "${org:-未知}"
+    printf '网络类型: %s\n' "${company_type:-未知}"
+    printf '公司滥用评分: %s\n' "${company_score:-未知}"
+    printf 'ASN 滥用评分: %s\n' "${asn_score:-未知}"
     printf '移动网络: %s\n' "$(bool_text "$mobile")"
-    printf '代理/VPN/Tor 标记: %s\n' "$(bool_text "$proxy")"
+    printf '代理标记: %s\n' "$(bool_text "$proxy")"
+    printf 'VPN 标记: %s\n' "$(bool_text "$vpn")"
+    printf 'Tor 标记: %s\n' "$(bool_text "$tor")"
+    printf '滥用标记: %s\n' "$(bool_text "$abuser")"
     printf '机房/Hosting 标记: %s\n\n' "$(bool_text "$hosting")"
   fi
 
   dnsbl_report="$(ip_quality_dnsbl_report "$ip")"
-  printf '%s\n\n' "$(printf '%s\n' "$dnsbl_report" | sed '/^__DNSBL_HITS__=/d')"
+  printf '%s\n\n' "$(printf '%s\n' "$dnsbl_report" | sed '/^__DNSBL_\(HITS\|CHECKED\)__=/d')"
   dnsbl_hits="$(printf '%s\n' "$dnsbl_report" | sed -n 's/^__DNSBL_HITS__=//p' | tail -n 1)"
+  dnsbl_checked="$(printf '%s\n' "$dnsbl_report" | sed -n 's/^__DNSBL_CHECKED__=//p' | tail -n 1)"
   dnsbl_hits="${dnsbl_hits:-0}"
+  dnsbl_checked="${dnsbl_checked:-0}"
 
   score=0
   [ "${proxy:-}" = "true" ] && score=$((score + 40))
-  [ "${hosting:-}" = "true" ] && score=$((score + 30))
+  [ "${vpn:-}" = "true" ] && score=$((score + 25))
+  [ "${tor:-}" = "true" ] && score=$((score + 60))
+  [ "${abuser:-}" = "true" ] && score=$((score + 30))
+  [ "${hosting:-}" = "true" ] && score=$((score + 20))
   if [[ "$dnsbl_hits" =~ ^[0-9]+$ ]] && [ "$dnsbl_hits" -gt 0 ]; then
     score=$((score + 40))
   fi
 
-  if [ "$score" -ge 60 ]; then
+  if [ "$base_ok" -eq 0 ] && [ "$dnsbl_hits" -eq 0 ]; then
+    level="无法判断"
+  elif [ "$score" -ge 60 ]; then
     level="风险较高"
-  elif [ "$score" -ge 30 ]; then
+  elif [ "$score" -ge 25 ]; then
     level="一般"
   else
     level="较干净"
   fi
 
   printf '参考结论: %s\n' "$level"
+  if [ "$dnsbl_checked" -eq 0 ]; then
+    printf '提示: DNSBL 没有返回可用结果，本次结论不包含黑名单判断。\n'
+  fi
   printf '说明: 结果仅供参考；不同平台风控规则不同，不能保证账号、支付或注册场景一定可用。\n'
 }
 
@@ -780,7 +924,10 @@ change_ip() {
   local old_ip new_ip body message uses_left next_allowed_at readable start now
 
   if [ "$wait_for_change" = "1" ]; then
-    old_ip="$(get_ip_plain 2>/dev/null || true)"
+    if ! old_ip="$(get_ip_plain)"; then
+      printf '无法取得更换前的 IP，已取消换 IP，避免错误判断。\n'
+      return 1
+    fi
   fi
 
   body="$(api_post changeIP/)" || return $?
@@ -983,16 +1130,19 @@ Boil Change IP $VERSION
   boil update       从 GitHub 拉取最新版并覆盖本地脚本
   boil version      显示版本号
   boil ddns         打开 SSH-Hardening DDNS 菜单
-  boil ddns-install 只安装/配置 DDNS 模块
+  boil ddns-install 仅安装/配置 DDNS 运行模块
+  boil ddns-run     立即执行一次 DDNS 更新
 
 环境变量:
   BOIL_TOKEN       临时指定 API Token，不读取 Token 文件
   BOIL_TOKEN_FILE  指定 Token 文件
   BOIL_STATE_FILE  指定状态缓存文件
   BOIL_API_BASE    指定 API 地址，默认 https://ippanel.boil.network/api/v1
+  BOIL_IP_QUALITY_API_BASE  指定 IP 质量查询 API 地址
   BOIL_UPDATE_URL  指定更新下载地址
-  BOIL_DDNS_URL    指定 SSH-Hardening DDNS 入口下载地址
-  BOIL_DDNS_HELPER 指定 DDNS 管理入口保存路径
+  BOIL_UPDATE_CHECKSUM_URL  指定更新校验文件地址
+  BOIL_DDNS_URL    指定固定版本的 SSH-Hardening 下载地址
+  BOIL_DDNS_SHA256 指定对应文件的 SHA256
 EOF
 }
 
@@ -1013,13 +1163,23 @@ main() {
       ddns_module_menu
       ;;
     ddns-install)
-      if ! ddns_find_manager >/dev/null 2>&1; then
-        ddns_install_helper || exit $?
+      ddns_require_root || exit $?
+      if ddns_find_manager >/dev/null 2>&1; then
+        ddns_run_manager install
+      else
+        ddns_run_downloaded_manager install
       fi
-      ddns_run_manager install
       ;;
     ddns-run)
-      ddns_run_manager run
+      ddns_require_root || exit $?
+      if ddns_find_manager >/dev/null 2>&1; then
+        ddns_run_manager run
+      elif [ -f /root/ddns.sh ]; then
+        bash /root/ddns.sh
+      else
+        printf 'DDNS 尚未安装，请先运行: boil ddns-install\n'
+        exit 1
+      fi
       ;;
     *)
       menu_loop

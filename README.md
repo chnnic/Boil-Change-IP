@@ -2,7 +2,7 @@
 
 Boil 家宽 IP API 菜单工具。安装后直接输入 `boil` 打开菜单，不需要反复记忆和输入 API 命令。
 
-当前版本：`V1.0.4`
+当前版本：`V1.0.5`
 
 API 文档来源：<https://cloud.boil.network/tutorial.php#api>
 
@@ -46,6 +46,8 @@ yum install -y curl python3 ca-certificates
 ```bash
 boil
 ```
+
+在线安装器会下载 `boil.sha256`，只有 SHA256 和 Bash 语法校验都通过才会安装。
 
 ### 升级旧版
 
@@ -136,7 +138,7 @@ boil
 
 首次使用请先选择 `6) 设置/更新 API Token`。
 
-输入 API Token 时会在屏幕上显示出来，粘贴后按 Enter 即可保存。
+输入 API Token 时屏幕不会显示字符。直接粘贴并按 Enter 即可保存，脚本随后会显示脱敏后的 Token。
 
 ## IP 质量查询
 
@@ -153,10 +155,10 @@ IP 质量查询不会使用 ping0.cc 数据。
 
 当前使用的数据：
 
-- `ip-api.com`：国家、地区、ASN、ISP、组织、是否移动网络、是否代理/VPN/Tor、是否 Hosting/机房
+- `ipapi.is`（HTTPS）：国家、地区、ASN、ISP、网络类型、代理、VPN、Tor、滥用和机房标记
 - DNSBL 本地查询：Spamhaus ZEN、Spamcop、SORBS、Barracuda
 
-说明：IP 质量结果仅供参考。不同平台的风控规则不同，检测结果不能保证账号、支付、注册、直播或电商场景一定可用。
+基础数据查询失败时会显示“无法判断”，不会把未知状态判为“较干净”。IP 质量结果仍仅供参考，不同平台的风控规则不同。
 
 ## 更新脚本
 
@@ -166,7 +168,7 @@ IP 质量查询不会使用 ping0.cc 数据。
 9) 更新脚本（从 GitHub 拉取）
 ```
 
-脚本会从 GitHub 下载最新版，先做语法校验，再覆盖本地 `boil` 命令。
+脚本会同时下载最新版和 `boil.sha256`。只有 SHA256、Bash 语法和版本号检查都通过，且不是降级版本时，才会覆盖本地 `boil` 命令。
 
 也可以不进菜单，直接运行：
 
@@ -194,14 +196,15 @@ boil version
 
 调用逻辑：
 
-1. 如果系统已经安装 `SSH-Hardening`，会优先调用已有入口：
+1. DDNS 管理必须使用 root 权限运行。
+2. 如果系统已经安装 `SSH-Hardening`，会优先调用 root 拥有且不可被组/其他用户写入的固定入口：
    - `/usr/local/bin/vps-tools --ddns-menu`
    - `/usr/local/bin/v --ddns-menu`
    - `/usr/local/bin/V --ddns-menu`
-2. 如果系统没有安装 `SSH-Hardening`，Boil 会只下载一个 DDNS 管理入口到：
-   - root 用户：`/usr/local/lib/boil/ssh-hardening-ddns.sh`
-   - 普通用户：`~/.local/share/boil/ssh-hardening-ddns.sh`
-3. 这个方式不会创建 `vps-tools`、`v`、`V` 主命令，只用于进入 DDNS 菜单或配置 DDNS。
+3. 如果系统没有安装 `SSH-Hardening`，Boil 会临时下载固定版本的 SSH-Hardening 管理器，并用内置 SHA256 校验。
+4. 管理器退出后临时文件立即删除；系统只保留 `/root/ddns.sh`、凭据、配置、日志和 cron 等 DDNS 运行文件，不创建 `vps-tools`、`v`、`V` 主命令。
+
+当前固定管理器版本为 SSH-Hardening `V3.9.38`（commit `9a9eb16`），SHA256 为 `08e09be4ef88569ea2d25ff17a9479661a8dfafd0a2c2521f4ce57665fdcdd54`。
 
 也可以直接运行：
 
@@ -209,10 +212,22 @@ boil version
 boil ddns
 ```
 
-只安装并配置 DDNS 模块：
+仅安装并配置 DDNS 运行模块：
 
 ```bash
 boil ddns-install
+```
+
+立即执行一次 DDNS 更新：
+
+```bash
+boil ddns-run
+```
+
+如果 V1.0.4 曾创建过旧 helper，可以在升级后删除；V1.0.5 不再执行它：
+
+```bash
+rm -f /usr/local/lib/boil/ssh-hardening-ddns.sh
 ```
 
 DDNS 模块会使用 `SSH-Hardening` 的原有文件路径：

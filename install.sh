@@ -9,6 +9,11 @@ if [ ! -f "$SOURCE_BIN" ]; then
   exit 1
 fi
 
+if ! bash -n "$SOURCE_BIN"; then
+  printf '脚本语法校验失败: %s\n' "$SOURCE_BIN" >&2
+  exit 1
+fi
+
 if [ "$(id -u)" -eq 0 ]; then
   INSTALL_DIR="/usr/local/bin"
   CONFIG_DIR="/etc/boil"
@@ -28,7 +33,7 @@ case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *)
     printf '\n注意: %s 不在 PATH 中。\n' "$INSTALL_DIR"
-    printf '可以临时运行: export PATH="%s:$PATH"\n' "$INSTALL_DIR"
+    printf '可以临时运行: export PATH="%s:%cPATH"\n' "$INSTALL_DIR" '$'
     ;;
 esac
 
